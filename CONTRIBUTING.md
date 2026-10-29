@@ -60,15 +60,19 @@ CI 会跑同样的命令（Go 1.24.x 与 1.27.x 两个版本）。**不要提交
 
 ## 版本发布流程（维护者）
 
+自 `v1.0.0` 起遵循语义化版本：**MAJOR** 含破坏性变更（并在 CHANGELOG 给迁移方式）、
+**MINOR** 新增能力且向后兼容、**PATCH** 仅缺陷/文档修复。1.x 内不允许破坏公开 API。
+
 1. 确认 `CHANGELOG.md` 的 `[Unreleased]` 已按版本号归档，日期正确。
 2. 全绿检查：`gofmt -l .` 为空、`go vet ./...`、`go test -race ./...`、`go test -bench=. -benchmem ./...`。
-3. 打 tag（语义化版本，**不加 `v` 以外的前缀**）：
+3. **先推 main 并等 CI 跑通**（含最低 Go 版本矩阵），再打 tag：
    ```bash
-   git tag -a v0.3.0 -m "v0.3.0"
-   git push origin main --follow-tags
+   git tag -a v1.0.0 -m "v1.0.0"
+   git push origin v1.0.0
    ```
 4. 在 GitHub 创建 Release，正文直接使用 CHANGELOG 对应段落（含 Breaking 说明与迁移方式）。
 5. tag 推送后 pkg.go.dev 会自动索引，检查文档页是否正常显示（`https://pkg.go.dev/github.com/brianbrian666/confwatch`）。
+6. 已发布的 tag **不移动、不重打**；发现问题发布新的 patch 版本。
 
 ## 报告问题
 

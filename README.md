@@ -6,13 +6,15 @@ Go 配置热更新库：**原子发布、不可变快照、加载失败不影响
 cfg := m.Get().Value()   // 无锁、不分配、永远是一份完整的配置
 ```
 
-> **状态：v0.2（开发中，未发布正式版本）**。已实现：快照与原子发布、配置源/解码器/校验器接口、
+> **状态：v1.0.0（已发布）**。已实现：快照与原子发布、配置源/解码器/校验器接口、
 > 错误分类、手动 `Reload`、文件变化监听（轮询 + fsnotify）、并发与泄漏测试、基准测试。
 > **尚未实现**：变更通知（订阅回调）、多层覆盖（环境变量/默认值文件）、历史回滚、
 > 远程配置中心。详见[已知限制](#已知限制)与[未来计划](#未来计划)。
 >
-> 本项目**尚未在任何生产环境使用**，README 中不含用户案例。API 在 v1.0 之前可能发生不兼容变更，
-> 每次变更都记入 [CHANGELOG](CHANGELOG.md)。
+> 自 v1.0.0 起遵循[语义化版本](https://semver.org/lang/zh-CN/)：**1.x 不引入破坏性变更**，
+> 新能力走 minor、修复走 patch，确有必要时发布 v2.0.0。变更全部记入 [CHANGELOG](CHANGELOG.md)。
+>
+> 本项目**尚未在任何生产环境使用**，README 中不含用户案例。
 
 ---
 
@@ -52,15 +54,15 @@ cfg := m.Get().Value()
 ## 3. 安装
 
 ```bash
-go get github.com/brianbrian666/confwatch
+go get github.com/brianbrian666/confwatch@v1.0.0
 ```
 
 ```bash
 # 可选：YAML 解码器（引入 gopkg.in/yaml.v3）
-go get github.com/brianbrian666/confwatch/decode/yaml
+go get github.com/brianbrian666/confwatch/decode/yaml@v1.0.0
 
 # 可选：事件式监听器（引入 github.com/fsnotify/fsnotify 及其唯一传递依赖 golang.org/x/sys）
-go get github.com/brianbrian666/confwatch/watcher/fsnotify
+go get github.com/brianbrian666/confwatch/watcher/fsnotify@v1.0.0
 ```
 
 依赖边界（未列出的包只用标准库）：
@@ -79,7 +81,7 @@ go get github.com/brianbrian666/confwatch/watcher/fsnotify
   `context.AfterFunc`）。
 - 本次提交的验证环境是 **go1.27.3 darwin/arm64**：`go test`、`go test -race`、`go vet`、
   `go test -bench` 全部通过。
-- CI 矩阵覆盖 `1.24.x`（声明的最低版本）与 `1.27.x`（当前开发版本）；只有 CI 实际跑通的版本
+- CI 矩阵覆盖 `1.24.x`（声明的最低版本）与 `1.27.x`（本次发布验证环境）；只有 CI 实际跑通的版本
   才会被写进上表。未安装 Go 1.24 的本地环境无法验证最低版本，这一点不做承诺。
 - 不使用 `go:build` 约束，也不使用 `//go:linkname` 之类会随版本失效的机制。
 
@@ -332,11 +334,11 @@ panic 会被 recover；耗时逻辑请自行丢进队列，否则会拖慢其后
 
 ## 9. API 文档入口
 
-- pkg.go.dev：<https://pkg.go.dev/github.com/brianbrian666/confwatch>（首个 tag 推送后生效）
+- pkg.go.dev：<https://pkg.go.dev/github.com/brianbrian666/confwatch>（`v1.0.0` tag 推送后由官方索引自动生成，若显示 404 说明 tag 尚未推送）
 - 本地：`go doc -all github.com/brianbrian666/confwatch`
 - 包内文档：`doc.go`（四条不可变边界、并发约定、Watch 语义），各类型的文档注释均包含"违反契约会发生什么"。
 
-公开 API 一览（v0.2）：
+公开 API 一览（v1.0.0）：
 
 ```go
 func Open[T any](ctx context.Context, opts ...Option) (*Manager[T], error)
@@ -412,7 +414,8 @@ BenchmarkReloadParallel-10      1226572     982.0 ns/op    890 B/op   13 allocs/
 
 ## 12. 未来计划
 
-按依赖顺序，先做能解决真实痛点的，不排"好看但没人用"的功能：
+按依赖顺序，先做能解决真实痛点的，不排"好看但没人用"的功能。
+**下列计划项均可通过 minor 版本加入，不需要破坏 1.x 的 API 承诺。**
 
 1. **变更通知（下一步）**：`m.Subscribe()` 返回带界缓冲区 + 丢弃计数的通道，或 `OnChange(func(Change[T]))`；
    `Change` 携带 `Reason`/`Version`，慢订阅者丢中间版本但不阻塞写者；订阅取消后不再收到通知。
