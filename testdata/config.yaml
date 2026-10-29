@@ -1,0 +1,6 @@
+server:
+  addr: ":8080"
+  read_timeout_seconds: 5
+db:
+  dsn: "postgres://localhost:5432/app?sslmode=disable"
+  max_open: 20
