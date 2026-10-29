@@ -1,0 +1,7 @@
+{
+  "server": {
+    "addr": ":8080",
+    "read_timeout_seconds": 5
+  },
+  "debug": false
+}

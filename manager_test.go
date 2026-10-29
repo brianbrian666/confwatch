@@ -480,7 +480,7 @@ func TestErrorCarriesDiagnostics(t *testing.T) {
 	}
 }
 
-func assertSnapshotUnchanged(t *testing.T, before, after confwatch.Snapshot[testConfig]) {
+func assertSnapshotUnchanged[T any](t *testing.T, before, after confwatch.Snapshot[T]) {
 	t.Helper()
 	if after.Version() != before.Version() {
 		t.Fatalf("version changed: %d -> %d", before.Version(), after.Version())

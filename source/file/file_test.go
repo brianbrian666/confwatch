@@ -100,3 +100,39 @@ func TestLoadHonorsCanceledContext(t *testing.T) {
 		t.Fatal("Load = nil, want context error")
 	}
 }
+
+// TestNewWithFormat 覆盖没有扩展名的文件（容器挂载点常见）。
+func TestNewWithFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config") // 无扩展名
+	if err := os.WriteFile(path, []byte(`{"addr":":8080"}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	// 未指定格式时无法推断，必须报错而不是静默猜一个。
+	src := New(path)
+	if _, err := src.Load(context.Background()); err == nil {
+		t.Fatal("Load = nil, want inability to infer format")
+	}
+
+	payload, err := NewWithFormat(path, confwatch.FormatJSON).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := payload.Format; got != confwatch.FormatJSON {
+		t.Fatalf("format = %v, want json", got)
+	}
+
+	// FormatUnknown 等价于按扩展名推断。
+	yamlPath := filepath.Join(dir, "app.yaml")
+	if err := os.WriteFile(yamlPath, []byte("a: 1\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	payload, err = NewWithFormat(yamlPath, confwatch.FormatUnknown).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := payload.Format; got != confwatch.FormatYAML {
+		t.Fatalf("format = %v, want yaml", got)
+	}
+}

@@ -14,13 +14,21 @@ import (
 	"github.com/brianbrian666/confwatch"
 )
 
-// Source 从单个本地文件读取配置。格式由扩展名推断：.json、.yaml、.yml。
+// Source 从单个本地文件读取配置。格式默认由扩展名推断：.json、.yaml、.yml。
 type Source struct {
-	path string
+	path   string
+	format confwatch.Format // FormatUnknown 表示按扩展名推断
 }
 
-// New 创建文件源。
+// New 创建文件源，格式按扩展名推断。
 func New(path string) *Source { return &Source{path: path} }
+
+// NewWithFormat 创建文件源并显式指定格式，用于没有扩展名（例如容器里挂载到
+// /etc/app/config 的文件）或扩展名不可信的场合。format 为 FormatUnknown 时
+// 等价于 New。
+func NewWithFormat(path string, format confwatch.Format) *Source {
+	return &Source{path: path, format: format}
+}
 
 // Path 返回文件路径。
 func (s *Source) Path() string { return s.path }
@@ -34,9 +42,13 @@ func (s *Source) Load(ctx context.Context) (confwatch.Payload, error) {
 		return confwatch.Payload{}, err
 	}
 
-	format, err := FormatOf(s.path)
-	if err != nil {
-		return confwatch.Payload{}, err
+	format := s.format
+	if format == confwatch.FormatUnknown {
+		var err error
+		format, err = FormatOf(s.path)
+		if err != nil {
+			return confwatch.Payload{}, err
+		}
 	}
 
 	data, err := os.ReadFile(s.path)
@@ -59,6 +71,6 @@ func FormatOf(path string) (confwatch.Format, error) {
 	case ".yaml", ".yml":
 		return confwatch.FormatYAML, nil
 	default:
-		return 0, fmt.Errorf("file: cannot infer format from extension %q of %s", ext, path)
+		return confwatch.FormatUnknown, fmt.Errorf("file: cannot infer format from extension %q of %s", ext, path)
 	}
 }

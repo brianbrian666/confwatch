@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.24.x 是 go.mod 声明的最低版本；1.27.x 是开发版本。
+        # 最低版本只有在这里真的跑通才算被支持。
+        go: ['1.24.x', '1.27.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: 依赖
+        run: go mod download
+
+      - name: 格式检查
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "以下文件需要 gofmt："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: 单元测试
+        run: go test -count=1 ./...
+
+      - name: 竞态检测
+        run: go test -count=1 -race ./...
+
+      - name: 并发稳定性（重复运行关键用例）
+        run: >
+          go test -count=10 -race
+          -run 'TestConcurrent|TestWatch|TestStress'
+          .
+        timeout-minutes: 10
+
+  bench:
+    name: 基准冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      # 只做冒烟（能跑通、能分配统计），不做数值门禁：
+      # GitHub runner 的噪声太大，数值回归需要专用机器 + benchstat。
+      - name: go test -bench
+        run: go test -run '^$' -bench=. -benchtime=200ms -benchmem ./...
+
+      - name: 零分配断言
+        run: go test -count=1 -run 'TestGetDoesNotAllocate' -v .

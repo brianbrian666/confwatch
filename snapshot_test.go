@@ -2,6 +2,7 @@ package confwatch_test
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -123,6 +124,7 @@ func TestFormatString(t *testing.T) {
 		format confwatch.Format
 		want   string
 	}{
+		{confwatch.FormatUnknown, "unknown"},
 		{confwatch.FormatJSON, "json"},
 		{confwatch.FormatYAML, "yaml"},
 		{confwatch.Format(99), "format(99)"},
@@ -130,6 +132,26 @@ func TestFormatString(t *testing.T) {
 	for _, tc := range tests {
 		if got := tc.format.String(); got != tc.want {
 			t.Fatalf("Format(%d).String() = %q, want %q", tc.format, got, tc.want)
+		}
+	}
+}
+
+// TestReasonString 保证日志输出可直接阅读（示例程序会打印它）。
+func TestReasonString(t *testing.T) {
+	tests := []struct {
+		reason confwatch.Reason
+		want   string
+	}{
+		{confwatch.Reason{Kind: confwatch.ReasonInitial}, "initial"},
+		{confwatch.Reason{Kind: confwatch.ReasonFileChanged}, "file-changed"},
+		{confwatch.Reason{Kind: confwatch.ReasonManualReload, Detail: "sighup"}, "manual: sighup"},
+	}
+	for _, tc := range tests {
+		if got := tc.reason.String(); got != tc.want {
+			t.Fatalf("Reason.String() = %q, want %q", got, tc.want)
+		}
+		if got := fmt.Sprint(tc.reason); got != tc.want {
+			t.Fatalf("fmt.Sprint(Reason) = %q, want %q", got, tc.want)
 		}
 	}
 }

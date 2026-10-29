@@ -18,10 +18,12 @@ type (
 type settings struct {
 	name       string
 	source     Source
+	watcher    Watcher
 	decoders   map[Format]Decoder
 	validators []validatorFunc
 	defaults   defaultsFunc
 	copyFunc   copyFunc
+	onError    func(error)
 	noopSkip   bool
 }
 
@@ -73,6 +75,37 @@ func WithDecoder(format Format, d Decoder) Option {
 			return fmt.Errorf("%w: nil decoder for %s", ErrNotConfigured, format)
 		}
 		s.decoders[format] = d
+		return nil
+	}
+}
+
+// WithWatcher 设置变化监听器，供 Manager.Watch 使用。不设置时 Watch 返回
+// ErrNotConfigured，手动 Reload 不受影响。
+//
+// 监听器不参与读取：它只负责说“可能变了”，真正的读取、解析、校验、发布仍走
+// Reload 的同一条流水线。参考实现见 watcher/poll 与 watcher/fsnotify。
+func WithWatcher(w Watcher) Option {
+	return func(s *settings) error {
+		if w == nil {
+			return fmt.Errorf("%w: nil watcher", ErrNotConfigured)
+		}
+		s.watcher = w
+		return nil
+	}
+}
+
+// WithErrorHook 注册错误回调，仅在调用方拿不到错误的路径上调用：
+// Watch 内部的重载失败、监听器自身的致命错误。
+//
+// 回调在触发它的 goroutine 上同步执行，必须快速返回；它 panic 会被 recover
+// 掉，不会影响监听循环，也不会回滚已发布的配置。手动 Reload 的错误仍然通过
+// 返回值交给调用方，不进入该回调。
+func WithErrorHook(fn func(error)) Option {
+	return func(s *settings) error {
+		if fn == nil {
+			return fmt.Errorf("%w: nil error hook", ErrNotConfigured)
+		}
+		s.onError = fn
 		return nil
 	}
 }

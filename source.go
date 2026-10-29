@@ -9,14 +9,18 @@ import (
 type Format uint8
 
 const (
+	// FormatUnknown 是 Format 的零值，表示未指定格式。
+	FormatUnknown Format = iota
 	// FormatJSON 表示 JSON 载荷。
-	FormatJSON Format = iota + 1
+	FormatJSON
 	// FormatYAML 表示 YAML 载荷。
 	FormatYAML
 )
 
 func (f Format) String() string {
 	switch f {
+	case FormatUnknown:
+		return "unknown"
 	case FormatJSON:
 		return "json"
 	case FormatYAML:
@@ -35,6 +39,10 @@ type Payload struct {
 	Format Format
 	// Digest 是可选的内容摘要。留空时由 Manager 用 sha256(Data) 计算。
 	// 摘要用于判断内容是否真的变化，从而避免无意义的版本递增。
+	//
+	// 只有在你比 sha256(Data) 更清楚“什么叫同一个内容”时才自己提供，例如把
+	// 上游配置中心的 revision 作为摘要。它必须随内容变化而变化：返回常量或
+	// 滞后摘要会让真实更新被当作无变化而静默跳过。
 	Digest string
 }
 

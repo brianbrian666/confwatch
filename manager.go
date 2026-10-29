@@ -31,6 +31,14 @@ type Manager[T any] struct {
 	// 可以被 context 取消。
 	token chan struct{}
 
+	// baseCtx 在 Close 时取消，用来停掉后台监听。它不携带任何值，只表达
+	// “Manager 仍然活着”。
+	baseCtx context.Context
+	cancel  context.CancelFunc
+
+	// watching 保证同一 Manager 上最多一个 Watch 在运行。
+	watching atomic.Bool
+
 	// mu 只保护下面几个诊断字段与 closed，临界区极短，不与 IO 混用。
 	// 加锁顺序：token -> mu，永不反向。
 	mu       sync.Mutex
@@ -66,7 +74,9 @@ func Open[T any](ctx context.Context, opts ...Option) (*Manager[T], error) {
 	}
 
 	m := &Manager[T]{set: set, token: make(chan struct{}, 1)}
+	m.baseCtx, m.cancel = context.WithCancel(context.Background())
 	if _, err := m.reload(ctx, "Open", Reason{Kind: ReasonInitial}, false); err != nil {
+		m.cancel()
 		return nil, err
 	}
 	return m, nil
@@ -229,6 +239,128 @@ func (m *Manager[T]) build(ctx context.Context, op string, cur Snapshot[T], reas
 	}, nil
 }
 
+// Watch 启动变化监听并将其阻塞在当前 goroutine，直到 ctx 结束、Close 被调用，
+// 或监听器自身失败。
+//
+// 监听路径不新开发布通道：每次触发都调用与 Reload 完全相同的流水线
+// （读取 -> 解码 -> 拷贝 -> 默认值 -> 校验 -> 发布）。因此监听器无法绕过校验，
+// 失败时当前配置逐字节不变，且后续触发仍会重试。
+//
+// 触发信号进入容量为 1 的合并信箱：连续多个事件最多排一次重载，慢速重载不会
+// 让事件堆积，也不会反向阻塞监听器。
+//
+// 返回语义：ctx 取消或 Close 属于正常停止，返回 nil；监听器不可恢复的失败（包括
+// panic 与未报错就返回）返回包装了 ErrWatcher 的错误，并同时写入 LastError 与
+// ErrorHook。后台重载失败不会终止监听，只写 LastError 与 ErrorHook，旧配置继续生效。
+//
+// 同一个 Manager 同时只允许一个 Watch；Watch 返回后可以再次启动。
+func (m *Manager[T]) Watch(ctx context.Context) error {
+	if err := m.checkInitialized("Watch"); err != nil {
+		return err
+	}
+	if ctx == nil {
+		return m.errAt("Watch", Snapshot[T]{}, 0, fmt.Errorf("%w: nil context", ErrNotConfigured))
+	}
+	w := m.set.watcher
+	if w == nil {
+		return m.errAt("Watch", m.Get(), 0, fmt.Errorf("%w: no watcher, use WithWatcher", ErrNotConfigured))
+	}
+
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return m.errAt("Watch", m.Get(), 0, ErrClosed)
+	}
+	if !m.watching.CompareAndSwap(false, true) {
+		return m.errAt("Watch", m.Get(), 0, ErrAlreadyWatching)
+	}
+	defer m.watching.Store(false)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// Close 也会停掉监听：baseCtx 取消时连带取消 runCtx。
+	stopAfterClose := context.AfterFunc(m.baseCtx, cancel)
+	defer stopAfterClose()
+
+	// 容量为 1 的合并信箱：重复触发被丢弃，不排队、不扩容。
+	wake := make(chan struct{}, 1)
+	notify := func() {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
+
+	watcherDone := make(chan error, 1)
+	go func() { watcherDone <- runWatcher(runCtx, w, notify) }()
+
+	for {
+		select {
+		case <-runCtx.Done():
+			// 先等监听器退出，保证 Watch 返回后不遗留任何 goroutine。
+			<-watcherDone
+			return nil
+
+		case err := <-watcherDone:
+			// runWatcher 只在 ctx 结束时返回 nil，其余情况都是非正常退出。
+			if err == nil {
+				return nil
+			}
+			fatal := m.errAt("Watch", m.Get(), 0, fmt.Errorf("%w: %w", ErrWatcher, err))
+			m.reportError(fatal)
+			return fatal
+
+		case <-wake:
+			if _, err := m.reload(runCtx, "Watch", Reason{Kind: ReasonFileChanged}, false); err != nil {
+				// 取消/关闭是本轮停止的正常结果，不算配置错误。
+				if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrClosed) {
+					m.reportError(err)
+				}
+			}
+		}
+	}
+}
+
+// runWatcher 启动监听器并把它归约为三类结果：nil（ctx 结束，正常停止）、错误
+// （监听器自身的不可恢复故障）、错误（panic 或未报错就停止）。
+//
+// 这一层不能省：如果监听器 panic 或静默返回，未经包装的 goroutine 会让
+// watcherDone 永远收不到值，Watch 就会永远阻塞在 <-watcherDone 上，成为一个
+// 无法回收的 goroutine。用户实现的 Watcher 不受本库控制，必须在这里兜底。
+func runWatcher(ctx context.Context, w Watcher, notify func()) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("watcher panicked: %v", p)
+		}
+	}()
+	if err := w.Run(ctx, notify); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	// 未报错就返回，且 ctx 仍然活着：监听已静默失效，不能当成正常停止。
+	return errors.New("watcher stopped without error")
+}
+
+// reportError 把错误记录到 LastError 并通知 ErrorHook。
+//
+// 它只用在调用方拿不到错误的路径（监听循环）。hook 的 panic 被吞掉：回调是
+// 用户的代码，不能让它把监听循环一起带走。
+func (m *Manager[T]) reportError(err error) {
+	m.mu.Lock()
+	m.lastErr = err
+	hook := m.set.onError
+	m.mu.Unlock()
+
+	if hook == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	hook(err)
+}
+
 func (m *Manager[T]) acquire(ctx context.Context, op string, tryOnly bool) error {
 	if tryOnly {
 		select {
@@ -248,24 +380,34 @@ func (m *Manager[T]) acquire(ctx context.Context, op string, tryOnly bool) error
 
 func (m *Manager[T]) release() { <-m.token }
 
-// Close 标记 Manager 已关闭。它会等待正在进行的发布结束，返回后不会再有任何新
-// 快照被发布。Close 是幂等的。
+// Close 标记 Manager 已关闭，并停掉正在运行的 Watch。它会等待正在进行的发布
+// 结束，返回后不会再有任何新快照被发布。Close 是幂等的。
 //
-// 关闭后 Get 仍返回最后一份有效快照（只读安全），但 Reload/TryReload 返回
-// ErrClosed。注意：若某个 Reload 的配置源忽略 ctx 并长时间阻塞，Close 会一直
-// 等待它结束。
+// 关闭后 Get 仍返回最后一份有效快照（只读安全），但 Reload/TryReload/Watch
+// 返回 ErrClosed。注意：若某个 Reload 的配置源忽略 ctx 并长时间阻塞，Close
+// 会一直等待它结束；Watch 的退出由其自身的 Run 返回保证，不在 Close 内等待。
 func (m *Manager[T]) Close() error {
 	if err := m.checkInitialized("Close"); err != nil {
 		return err
 	}
+
+	// 顺序很重要：先拒绝新写入并取消监听，最后才等写者令牌。
+	//
+	// 反过来做（先等令牌再取消）会让 Close 无限期地等一个正在等 ctx 取消的
+	// 监听重载：它持有令牌，而能取消它的信号恰恰排队在 Close 后面。先 cancel
+	// 能让下一次 ctx 检查把它中止，令牌随即释放。
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+
+	// 取消 baseCtx，让所有监听循环停止。cancel 可重复调用。
+	m.cancel()
+
+	// 拿到令牌说明所有在途发布都已结束；返回后不会再出现新版本。
 	if err := m.acquire(context.Background(), "Close", false); err != nil {
 		return err
 	}
 	defer m.release()
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.closed = true
 	return nil
 }
 

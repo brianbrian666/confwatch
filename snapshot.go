@@ -19,6 +19,8 @@ const (
 	ReasonInitial ReasonKind = iota + 1
 	// ReasonManualReload 表示由调用方调用 Reload 或 TryReload 触发。
 	ReasonManualReload
+	// ReasonFileChanged 表示由 Watcher 检测到变化后经 Watch 触发。
+	ReasonFileChanged
 )
 
 func (k ReasonKind) String() string {
@@ -27,6 +29,8 @@ func (k ReasonKind) String() string {
 		return "initial"
 	case ReasonManualReload:
 		return "manual"
+	case ReasonFileChanged:
+		return "file-changed"
 	default:
 		return "unknown(" + strconv.Itoa(int(k)) + ")"
 	}
@@ -36,6 +40,14 @@ func (k ReasonKind) String() string {
 type Reason struct {
 	Kind   ReasonKind
 	Detail string
+}
+
+// String 实现 fmt.Stringer，输出形如 "initial" 或 "file-changed: /etc/app.yaml"。
+func (r Reason) String() string {
+	if r.Detail == "" {
+		return r.Kind.String()
+	}
+	return r.Kind.String() + ": " + r.Detail
 }
 
 // header 是快照的元数据。它与配置值放在同一个对象里，因此二者总是一致的。

@@ -40,12 +40,20 @@ var (
 
 	// ErrReloadInFlight 表示 TryReload 时已有其他发布正在进行。
 	ErrReloadInFlight = errors.New("reload already in progress")
+
+	// ErrWatcher 表示监听器自身发生不可恢复的失败（不是配置错误）。
+	// 配置错误始终是 ErrSource/ErrDecode/ErrValidation，监听失败只意味着
+	// 之后不会再有自动重载，当前快照依然有效。
+	ErrWatcher = errors.New("watcher failed")
+
+	// ErrAlreadyWatching 表示同一 Manager 上已有 Watch 在运行。
+	ErrAlreadyWatching = errors.New("watch already started")
 )
 
 // Error 携带诊断上下文的错误。库产生的所有错误都是 *Error，因此可以用
 // errors.As 取出 Source、Version、Attempt 等字段做日志或指标。
 type Error struct {
-	Op      string  // 操作名："Open"、"Reload"、"TryReload"、"Close"
+	Op      string  // 操作名："Open"、"Reload"、"TryReload"、"Close"、"Watch"
 	Name    string  // Manager 名称（WithName 设置），未设置时为空
 	Source  string  // 配置源描述（Source.Describe），未知时为空
 	Version Version // 出错时当前有效快照的版本，0 表示尚无有效快照
