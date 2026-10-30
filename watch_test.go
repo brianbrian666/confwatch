@@ -566,3 +566,28 @@ func TestWatchConcurrentWithManualReload(t *testing.T) {
 	cancel()
 	waitWatchDone(t, done)
 }
+
+// TestWatchStopsWhenDeadlineExpires 钉住 ctx 的生命周期语义：Watch 的 ctx 决定整个
+// 监听的生命周期，deadline 到期后监听停止并返回 nil（与用户主动停止无法区分）。
+// 这正是文档反复提醒“不要把带超时的启动 ctx 复用给 Watch”的原因。
+func TestWatchStopsWhenDeadlineExpires(t *testing.T) {
+	fw := newFakeWatcher()
+	m := openManager(t, newSource(`{"addr":":8080"}`), confwatch.WithWatcher(fw))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	done := startWatch(t, m, ctx, fw)
+	waitWatchDone(t, done)
+
+	if got := m.Get().Version(); got != 1 {
+		t.Fatalf("version = %d, want 1", got)
+	}
+	if err := m.LastError(); err != nil {
+		t.Fatalf("LastError = %v, want nil（ctx 到期不是配置失败）", err)
+	}
+	// 监听已退出：没有人再接收触发信号，这里的非阻塞发送必然失败。
+	if fw.tryFire() {
+		t.Fatal("监听已停止，不应还能接收触发")
+	}
+}

@@ -9,7 +9,47 @@
 
 ## [Unreleased]
 
-暂无。
+## [1.1.0] - 2026-10-30
+
+生产级可靠性审计后的第二个发布版本。**无破坏性变更**：没有删除、重命名任何导出标识符，
+没有修改任何函数签名，没有删除任何结构体字段。按 minor 发布是因为两处**行为收紧**（依赖旧行为的
+代码需要各自检查，详见 Changed）。
+
+### Fixed
+
+- **`watcher/fsnotify`：父目录被删除或改名后监听静默失效（审计 P0）**。fsnotify 会在目录 inode
+  消失后从内部表摘掉 watch，此后不再投递任何事件也不报错；而唯一能反映失效的事件 `Name` 是
+  目录本身，被针对文件名的过滤丢掉。修复后 `Run` 返回 `fsnotify: watched directory ... is gone`，
+  `Watch` 将其归约为 `ErrWatcher` 并写入 `LastError()` 与 `ErrorHook`。
+  （修复前已实测：`rm -rf` 目录再重建并写入，2s 内无通知、无错误、`Run` 不返回。）
+- **取消与关闭不再计入 `Stats().Failed` 与 `LastError()`**。之前优雅关闭时被打断的那次监听重载
+  会留下一条假故障，使基于 `Failed > 0` 或 `LastError != nil` 的告警在每次重启时误报。
+  取消/关闭的错误仍照常返回给调用方，也会计入 `Attempts`，但不计入 `Failed`/`Noops`。
+
+### Changed
+
+- **行为收紧 1**：`watcher/fsnotify` 的 `Run` 在父目录消失时会返回错误。若有代码依赖“`Run` 永不返回”
+  的旧行为，需要在返回值上做处理（重建 `Watcher` 或向上报错）。
+- **行为收紧 2**：`ErrCanceled`/`ErrClosed` 不再写入 `LastError()`、不再计入 `Stats().Failed`。
+  监控口径从“含取消的失败数”变为“不含取消的失败数”。
+- `watcher/fsnotify` 的 `match` 注释不再声称将 `Chmod` 放行（实现一直是有意排除，现在文档与代码一致）。
+- `Close` 与 `LastError` 的文档补充说明：关闭本身既不写入也不清除 `LastError`。
+
+### Docs & Tests
+
+- `doc.go`/README 明确两件事：`Watch` 的 ctx 决定整个监听生命周期（不要把带 `WithTimeout` 的
+  启动 ctx 复用给它）；库只对 `Watcher.Run` 与 `ErrorHook` 的 panic 兜底，配置源/解码器/校验器的
+  panic 按 Go 默认行为终止进程。
+- README 补充：`decode/json` 默认不拒绝未知字段（可用 `DisallowUnknownFields` 收紧）、
+  `Stats` 计数器不是原子截面、`poll.Interval` 无下限、`yaml.v3` 上游低维护、
+  `fsnotify` 遇卸载/`IN_IGNORED` 无事件可依的残留限制，以及监听器对比表新增“父目录被删除/卸载”一行。
+- `examples/watchfile` 在主 `select` 里直接处理监听器退出，不再“带着已停的热更新继续跑”。
+- CI 的并发稳定性作业从根包扩到 `./...`，让依赖真实内核事件的用例（目录删除等）也进入重复验证。
+- 新增测试：`TestRunFailsWhenWatchedDirGone`、`TestWatchedDirGone`、
+  `TestWatchReportsWatcherDeathWhenDirGone`、`TestCanceledReloadIsNotAFailure`、
+  `TestWatchStopsWhenDeadlineExpires`、`TestValidatorPanicPropagates`、
+  `TestNoopReloadReturnsCurrentSnapshot`；删除 e2e 里用 `time.Sleep(100ms)` 的弱断言，
+  改为结构性断言（`Watch` 已 join + `Reload`/`Watch` 返回 `ErrClosed`）。
 
 ## [1.0.0] - 2026-10-29
 

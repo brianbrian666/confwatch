@@ -15,6 +15,9 @@
 //   - 文件删除后重建同样会触发，Manager 每次都会重新读取内容，不依赖事件类型。
 //   - 事件可能丢失（内核队列溢出）。每次触发都会重新读取并比对摘要，因此丢失
 //     事件不会造成错乱，只会漏掉某次更新；需要更强保证时改用 watcher/poll。
+//   - 父目录本身被删除或改名后，内核会摘掉 watch，之后不再有任何事件。这种情况
+//     Run 返回错误而不是静默继续；需要继续监听请重建 Watcher（或等路径回来后
+//     再次调用 Run）。
 package fsnotify
 
 import (
@@ -22,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -95,6 +99,11 @@ func (w *Watcher) Run(ctx context.Context, notify func()) error {
 			if !ok {
 				return errors.New("fsnotify: events channel closed")
 			}
+			// 目录本身没了就必须报错：fsnotify 已经把 watch 摘掉，之后既不会再
+			// 有事件，也不会往 Errors 里送错，不在这里识别就成了静默失效。
+			if watchedDirGone(ev, dir) {
+				return fmt.Errorf("fsnotify: watched directory %s is gone", dir)
+			}
 			if !match(ev, target) {
 				continue
 			}
@@ -122,13 +131,37 @@ func (w *Watcher) Run(ctx context.Context, notify func()) error {
 
 // match 判断事件是否与目标文件相关。
 //
-// 只关心内容可能变化的操作：Write/Create/Remove/Rename。纯 Chmod 不改变内容，
-// 但某些编辑器用 chmod 作为"写完了"的信号，所以只要 Op 里带任何变化位就放行。
+// 只关心内容可能变化的操作：Write/Create/Remove/Rename。纯 Chmod 不会产生新的
+// 内容（真实写入一定伴随 Write 或 Create），因此这里有意把它排除在掩码之外，
+// 避免一次 chmod 引发多余的重载。
 func match(ev fsnotify.Event, target string) bool {
 	if filepath.Clean(ev.Name) != target {
 		return false
 	}
 	return ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
+}
+
+// watchedDirGone 判断事件是否表示被监听的目录（或它的某个祖先）已经不可达。
+//
+// 这不是可选的健壮性修饰。fsnotify 在目录 inode 被删除（Linux 的 IN_DELETE_SELF）
+// 或被改名（IN_MOVE_SELF、kqueue 的 NOTE_RENAME）之后，会直接把 watch 从内部表里
+// 摘掉，内核也不再投递该目录下的任何事件。而唯一能反映这次失效的事件，Name 是
+// 目录本身，会被针对文件名的 match 丢掉。漏掉它的后果是监听静默失效：没有通知、
+// 没有错误、Run 永不返回，配置永久停在旧值。
+func watchedDirGone(ev fsnotify.Event, dir string) bool {
+	if ev.Op&(fsnotify.Remove|fsnotify.Rename) == 0 {
+		return false
+	}
+	name := filepath.Clean(ev.Name)
+	if name == dir {
+		return true
+	}
+	// 祖先目录被删掉或改名时，目标目录同样不再可达。相对路径与根目录不参与
+	// 前缀判断：前者没有有意义的前缀，后者不可能有祖先。
+	if dir == "." || dir == ".." || dir == string(filepath.Separator) {
+		return false
+	}
+	return strings.HasPrefix(dir, name+string(filepath.Separator))
 }
 
 // Describe 返回监听目标的描述，便于日志。

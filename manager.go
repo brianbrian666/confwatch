@@ -140,10 +140,14 @@ func (m *Manager[T]) reload(ctx context.Context, op string, reason Reason, tryOn
 
 	snap, err := m.build(ctx, op, cur, reason, attempt)
 	if err != nil {
-		m.mu.Lock()
-		m.failed++
-		m.lastErr = err
-		m.mu.Unlock()
+		// 取消与关闭不是配置失败，不能记成 Failed/LastError：否则每次优雅关闭
+		// 都会留下一条假故障，基于 Failed>0 或 LastError!=nil 的告警必然误报。
+		if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrClosed) {
+			m.mu.Lock()
+			m.failed++
+			m.lastErr = err
+			m.mu.Unlock()
+		}
 		return Snapshot[T]{}, err
 	}
 
@@ -253,6 +257,10 @@ func (m *Manager[T]) build(ctx context.Context, op string, cur Snapshot[T], reas
 // panic 与未报错就返回）返回包装了 ErrWatcher 的错误，并同时写入 LastError 与
 // ErrorHook。后台重载失败不会终止监听，只写 LastError 与 ErrorHook，旧配置继续生效。
 //
+// ctx 决定整个监听的生命周期，而不只是某一次加载：与 Open 不同，这里的 ctx 一旦
+// 结束（包括 WithTimeout/WithDeadline 到期）监听就停止并返回 nil。不要把带超时的
+// 启动 ctx 复用给 Watch，否则热更新会在超时后静默停止。
+//
 // 同一个 Manager 同时只允许一个 Watch；Watch 返回后可以再次启动。
 func (m *Manager[T]) Watch(ctx context.Context) error {
 	if err := m.checkInitialized("Watch"); err != nil {
@@ -313,7 +321,8 @@ func (m *Manager[T]) Watch(ctx context.Context) error {
 
 		case <-wake:
 			if _, err := m.reload(runCtx, "Watch", Reason{Kind: ReasonFileChanged}, false); err != nil {
-				// 取消/关闭是本轮停止的正常结果，不算配置错误。
+				// reload 已经把取消/关闭排除在 Failed/LastError 之外，这里只需阻止
+				// 把它们送进 ErrorHook：监听停止不是配置错误。
 				if !errors.Is(err, ErrCanceled) && !errors.Is(err, ErrClosed) {
 					m.reportError(err)
 				}
@@ -384,8 +393,9 @@ func (m *Manager[T]) release() { <-m.token }
 // 结束，返回后不会再有任何新快照被发布。Close 是幂等的。
 //
 // 关闭后 Get 仍返回最后一份有效快照（只读安全），但 Reload/TryReload/Watch
-// 返回 ErrClosed。注意：若某个 Reload 的配置源忽略 ctx 并长时间阻塞，Close
-// 会一直等待它结束；Watch 的退出由其自身的 Run 返回保证，不在 Close 内等待。
+// 返回 ErrClosed。关闭本身既不写入也不清除 LastError。注意：若某个 Reload 的配置源
+// 忽略 ctx 并长时间阻塞，Close 会一直等待它结束；Watch 的退出由其自身的 Run 返回
+// 保证，不在 Close 内等待。
 func (m *Manager[T]) Close() error {
 	if err := m.checkInitialized("Close"); err != nil {
 		return err
@@ -413,6 +423,8 @@ func (m *Manager[T]) Close() error {
 
 // LastError 返回最近一次加载失败的错误；最近一次加载成功（含因摘要相同而跳过）
 // 则返回 nil。它不受 Close 影响。
+//
+// 取消与被关闭都不算失败：它们不会写入 LastError，也不会送进 ErrorHook。
 func (m *Manager[T]) LastError() error {
 	if m == nil {
 		return nil
@@ -423,12 +435,16 @@ func (m *Manager[T]) LastError() error {
 }
 
 // Stats 是 Manager 的累计计数器。
+//
+// 它不是同一时刻的原子截面：在途加载已经计入 Attempts、但尚未发布时会临时出现
+// Attempts 恰好比 Published 大 1 的情况，这属于正常过程而非丢失更新。
 type Stats struct {
-	// Attempts 是已开始的加载次数，包含 Open 的首次加载。
+	// Attempts 是已开始的加载次数，包含 Open 的首次加载。被取消或撞上关闭的加载
+	// 计入 Attempts，但不计入 Failed、Published 与 Noops。
 	Attempts uint64
 	// Published 是成功发布的次数，等于当前版本号。
 	Published uint64
-	// Failed 是失败的加载次数。
+	// Failed 是失败的加载次数。取消与关闭不计入。
 	Failed uint64
 	// Noops 是因摘要未变化而跳过发布的次数。
 	Noops uint64

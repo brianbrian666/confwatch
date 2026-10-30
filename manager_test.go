@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brianbrian666/confwatch"
 	jsoncodec "github.com/brianbrian666/confwatch/decode/json"
@@ -503,3 +504,103 @@ type fixedSource struct {
 
 func (s *fixedSource) Load(context.Context) (confwatch.Payload, error) { return s.payload, nil }
 func (s *fixedSource) Describe() string                                { return "test:fixed" }
+
+// TestCanceledReloadIsNotAFailure 钉住“取消/关闭不是失败”的口径。
+//
+// 优雅关闭时被 ctx 取消的那次监听重载，曾经会把 Failed+1 并把 LastError 改成
+// ErrCanceled，导致基于 Failed>0 或 LastError!=nil 的告警在每次重启时误报。
+func TestCanceledReloadIsNotAFailure(t *testing.T) {
+	src := newGateSource(`{"addr":":8080"}`)
+	m := openManager(t, src)
+
+	gate, entered := make(chan struct{}), make(chan struct{}, 1)
+	src.setGate(gate, entered)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Reload(ctx)
+		done <- err
+	}()
+
+	// 确定性地等到 Load 真的进入阻塞，而不是 sleep。
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Reload 未进入 Load")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, confwatch.ErrCanceled) {
+			t.Fatalf("err = %v, want ErrCanceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("取消后 Reload 未返回")
+	}
+
+	if got, want := m.Stats(), (confwatch.Stats{Attempts: 2, Published: 1}); got != want {
+		t.Fatalf("stats = %+v, want %+v", got, want)
+	}
+	if err := m.LastError(); err != nil {
+		t.Fatalf("LastError = %v, want nil（取消不算失败）", err)
+	}
+	if got := m.Get().Version(); got != 1 {
+		t.Fatalf("version = %d, want 1", got)
+	}
+
+	// 关闭后的 Reload 同理：返回 ErrClosed，但不留假故障。
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := m.Reload(context.Background()); !errors.Is(err, confwatch.ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+	if got, want := m.Stats().Failed, uint64(0); got != want {
+		t.Fatalf("Failed = %d, want %d（取消与关闭都不计入）", got, want)
+	}
+	if err := m.LastError(); err != nil {
+		t.Fatalf("LastError = %v, want nil", err)
+	}
+}
+
+// TestNoopReloadReturnsCurrentSnapshot 记录 noop 的返回语义：内容未变时返回的是
+// 当前快照（版本、发布原因都保持上一次真正发布时的值），调用方要判断“是否发布了
+// 新版本”只能比较调用前后的 Version()。
+func TestNoopReloadReturnsCurrentSnapshot(t *testing.T) {
+	m := openManager(t, newSource(`{"addr":":8080"}`))
+
+	snap, err := m.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if got := snap.Version(); got != 1 {
+		t.Fatalf("version = %d, want 1", got)
+	}
+	if got := snap.Reason().Kind; got != confwatch.ReasonInitial {
+		t.Fatalf("reason = %v, want initial（noop 不刷新发布原因）", got)
+	}
+	if got := m.Stats().Noops; got != 1 {
+		t.Fatalf("Noops = %d, want 1", got)
+	}
+}
+
+// panickingValidator 模拟用户代码里的编程错误（例如向 nil map 写入）。
+type panickingValidator struct{}
+
+func (panickingValidator) Validate(context.Context, *testConfig) error { panic("validator boom") }
+
+// TestValidatorPanicPropagates 钉住 panic 语义：库只对监听器与 ErrorHook 的 panic
+// 兜底（不 recover 会让 Watch 永久阻塞或污染监听循环），配置源/解码器/校验器的
+// panic 属于编程错误，必须按 Go 的默认行为向上传播，不能被静默吞掉。
+func TestValidatorPanicPropagates(t *testing.T) {
+	defer func() {
+		if p := recover(); p == nil {
+			t.Fatal("校验器 panic 必须向上传播，不能被库吞掉")
+		}
+	}()
+
+	openWith[testConfig](t, newSource(`{"addr":":8080"}`), confwatch.WithValidator(panickingValidator{}))
+	t.Fatal("不应执行到这里：panic 必须传播")
+}

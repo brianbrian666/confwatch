@@ -6,7 +6,7 @@ Go 配置热更新库：**原子发布、不可变快照、加载失败不影响
 cfg := m.Get().Value()   // 无锁、不分配、永远是一份完整的配置
 ```
 
-> **状态：v1.0.0（已发布）**。已实现：快照与原子发布、配置源/解码器/校验器接口、
+> **状态：v1.1.0（已发布）**。已实现：快照与原子发布、配置源/解码器/校验器接口、
 > 错误分类、手动 `Reload`、文件变化监听（轮询 + fsnotify）、并发与泄漏测试、基准测试。
 > **尚未实现**：变更通知（订阅回调）、多层覆盖（环境变量/默认值文件）、历史回滚、
 > 远程配置中心。详见[已知限制](#已知限制)与[未来计划](#未来计划)。
@@ -54,15 +54,15 @@ cfg := m.Get().Value()
 ## 3. 安装
 
 ```bash
-go get github.com/brianbrian666/confwatch@v1.0.0
+go get github.com/brianbrian666/confwatch@v1.1.0
 ```
 
 ```bash
 # 可选：YAML 解码器（引入 gopkg.in/yaml.v3）
-go get github.com/brianbrian666/confwatch/decode/yaml@v1.0.0
+go get github.com/brianbrian666/confwatch/decode/yaml@v1.1.0
 
 # 可选：事件式监听器（引入 github.com/fsnotify/fsnotify 及其唯一传递依赖 golang.org/x/sys）
-go get github.com/brianbrian666/confwatch/watcher/fsnotify@v1.0.0
+go get github.com/brianbrian666/confwatch/watcher/fsnotify@v1.1.0
 ```
 
 依赖边界（未列出的包只用标准库）：
@@ -196,7 +196,9 @@ type Decoder interface {
 }
 ```
 
-`decode/json` 用 `json.Unmarshal`，并对空文档、`null` 文档显式报错（避免静默发布零值配置）；
+`decode/json` 用 `json.Unmarshal`，并对空文档、`null` 文档显式报错（避免静默发布零值配置）。
+注意它**默认不拒绝未知字段**（与 `encoding/json` 一致）：配置文件里拼错的键会被静默忽略。
+需要严格模式时用 `jsoncodec.New()` 后设置 `DisallowUnknownFields = true`，拼写错误会在加载时直接失败。
 `decode/yaml` 先把 YAML 转成 JSON 数据模型再复用同一套 `json` 标签。自定义解码器（TOML、INI、
 protobuf）只要满足「每次产生全新对象、失败不留半成品」即可接入。
 
@@ -240,6 +242,10 @@ stop()                    // 或 m.Close()，两者都可重复调用
 if err := <-done; err != nil { /* ErrWatcher：监听器自身故障 */ }
 ```
 
+> **不要把带超时的启动 ctx 交给 `Watch`。** `Open` 的 ctx 只约束首次加载，而 `Watch` 的 ctx 决定
+> **整个监听的生命周期**。如果传进来的是 `context.WithTimeout(ctx, 30*time.Second)`，监听会在 30 秒
+> 后停止并返回 `nil` —— 与主动停止无法区分。用一个独立的、只在退出时取消的 ctx。
+
 ### 两种监听器怎么选
 
 | | `watcher/poll` | `watcher/fsnotify` |
@@ -248,6 +254,7 @@ if err := <-done; err != nil { /* ErrWatcher：监听器自身故障 */ }
 | 延迟 | 最坏一个轮询周期（默认 1s，可配） | 毫秒级（去抖默认 50ms） |
 | 原子替换 / 删除重建 | 天然支持（比对内容摘要） | 支持（监听父目录，去抖合并） |
 | 事件丢失 | 无此问题 | 可能丢事件，靠每次重新读取兜底 |
+| 父目录被删除 / 卸载 | 天然支持（路径没了只表现为读取失败，重建后自动恢复） | 删除/改名会返回错误（需重建 Watcher）；**卸载可能无事件**，见[已知限制](#11-已知限制) |
 | K8s ConfigMap（切换 `..data` 符号链接） | 支持 | **不匹配**（只认目标文件名，请用 poll） |
 | 适用 | 单文件、NFS、符号链接切换、无法引入依赖 | 本地文件、对切换延迟敏感 |
 
@@ -282,13 +289,22 @@ confwatch.WithValidator(confwatch.ValidatorFunc[Config](func(ctx context.Context
 | `ErrDecode` | 解析失败（语法、类型、空文档、`null` 文档） | 不变 |
 | `ErrValidation` | 校验失败 | 不变 |
 | `ErrNotInitialized` | 在零值 `Manager` 上调用写入方法 | — |
-| `ErrCanceled` | 被 ctx 取消（同时包装 `context.Canceled`/`DeadlineExceeded`） | 不变 |
+| `ErrCanceled` | 被 ctx 取消（同时包装 `context.Canceled`/`DeadlineExceeded`），**不计入 `Failed`/`LastError`** | 不变 |
 | `ErrClosed` | `Manager` 已关闭 | 保持最后一份 |
 | `ErrReloadInFlight` | `TryReload` 撞上正在进行中的发布 | 保持旧值 |
 | `ErrWatcher` | 监听器自身不可恢复故障（含 panic、未报错就退出） | 不变 |
 | `ErrAlreadyWatching` | 同一 `Manager` 上已有 `Watch` | 不变 |
 
 没有「发布失败」这一类：发布的唯一动作是 `atomic.Pointer.Store`，它不会失败。
+
+**取消与关闭不算失败**：它们的错误照常返回给调用方，但不会写入 `LastError()`、不会计入
+`Stats().Failed`、也不会进入 `ErrorHook`。否则每次优雅关闭时被打断的那次重载都会留下一条假故障，
+让基于 `Failed > 0` 或 `LastError != nil` 的告警在每次重启时误报。
+
+**panic 的边界**：库只对两处外部 panic 兜底——`Watcher.Run` 内的 panic（否则 `Watch` 会永久阻塞）
+与 `ErrorHook` 内的 panic（否则会带崩监听循环）。配置源、解码器、默认值函数、拷贝函数与校验器里的
+panic **不会**被 recover：它们属于编程错误，会按 Go 的默认行为终止进程（在后台监听路径上也一样）。
+如果你希望后台路径也不崩，请在自定义实现里自己兜底，不要指望库替你吞 panic。
 
 后台（监听路径）失败如何被观察到——因为调用方拿不到返回值：
 
@@ -327,6 +343,11 @@ panic 会被 recover；耗时逻辑请自行丢进队列，否则会拖慢其后
   被归约为 `ErrWatcher`）；`TestWatchDoesNotLeakGoroutines` 用真实监听器跑 20 轮启停，断言
   goroutine 数回到基线。
 - **无无界队列**：唯一的队列是容量 1 的合并信箱（满了丢弃）。计数器是固定几个整数，不随事件增长。
+- **计数器不是原子截面**：在途加载已经计入 `Attempts`、但尚未发布时会临时出现 `Attempts` 恰好比
+  `Published` 大 1，这属正常过程。被取消或撞上关闭的尝试计入 `Attempts`，但不计入 `Failed`/`Noops`。
+- **监听失效是可观测的**：`fsnotify` 的父目录被删除/改名后 `Run` 返回错误，`Watch` 把它归约为
+  `ErrWatcher` 并写入 `LastError()` 与 `ErrorHook`。但仍然**没有**自动重启，也**没有**「当前是否
+  正在监听」的查询接口（计划在 v1.2 加 `Stats().Watching`）。
 - **无订阅者**：本项目当前**没有**变更通知 API，因此不存在「订阅者队列积压」「订阅者退出后仍收到
   通知」「慢订阅者拖住写者」这类问题——它们会在实现通知时一并设计（见未来计划）。
 - `atomic.Pointer` 只能保护指针本身；`Manager` 内部还有 `sync.Mutex` 与 `atomic.Bool`，因此
@@ -334,11 +355,11 @@ panic 会被 recover；耗时逻辑请自行丢进队列，否则会拖慢其后
 
 ## 9. API 文档入口
 
-- pkg.go.dev：<https://pkg.go.dev/github.com/brianbrian666/confwatch>（`v1.0.0` tag 推送后由官方索引自动生成，若显示 404 说明 tag 尚未推送）
+- pkg.go.dev：<https://pkg.go.dev/github.com/brianbrian666/confwatch>（`v1.1.0` tag 推送后由官方索引自动生成，若显示 404 说明 tag 尚未推送）
 - 本地：`go doc -all github.com/brianbrian666/confwatch`
 - 包内文档：`doc.go`（四条不可变边界、并发约定、Watch 语义），各类型的文档注释均包含"违反契约会发生什么"。
 
-公开 API 一览（v1.0.0）：
+公开 API 一览（v1.1.0）：
 
 ```go
 func Open[T any](ctx context.Context, opts ...Option) (*Manager[T], error)
@@ -376,12 +397,12 @@ benchstat old.txt new.txt     # 做回归对比（需 go install golang.org/x/pe
 不是性能承诺）：
 
 ```
-BenchmarkGet-10               225480201     5.158 ns/op     0 B/op    0 allocs/op
-BenchmarkGetValue-10          216492194     5.552 ns/op     0 B/op    0 allocs/op
-BenchmarkGetParallel-10      1000000000     0.8175 ns/op    0 B/op    0 allocs/op
-BenchmarkReloadNoop-10          1433710     830.7 ns/op   1193 B/op   17 allocs/op
-BenchmarkReloadPublish-10       1353594     889.2 ns/op   1369 B/op   21 allocs/op
-BenchmarkReloadParallel-10      1226572     982.0 ns/op    890 B/op   13 allocs/op
+BenchmarkGet-10               206810335     5.179 ns/op     0 B/op    0 allocs/op
+BenchmarkGetValue-10          215390084     5.622 ns/op     0 B/op    0 allocs/op
+BenchmarkGetParallel-10      1000000000     0.9122 ns/op    0 B/op    0 allocs/op
+BenchmarkReloadNoop-10          1406713     846.7 ns/op   1193 B/op   17 allocs/op
+BenchmarkReloadPublish-10       1330886     904.9 ns/op   1369 B/op   21 allocs/op
+BenchmarkReloadParallel-10      1000000      1004 ns/op    888 B/op   13 allocs/op
 ```
 
 读路径零分配不是文档口号，而是断言：`TestGetDoesNotAllocate` 用 `testing.AllocsPerRun` 检查
@@ -411,6 +432,11 @@ BenchmarkReloadParallel-10      1226572     982.0 ns/op    890 B/op   13 allocs/
 10. **没有变更通知**：更新后无法得到回调，只能轮询 `m.Get().Version()`。
 11. **没有历史与回滚**：旧快照可以被调用方自己持有（它不可变），但库不保存历史。
 12. **不限制配置体积**：读文件不设上限，超大文件会按解码器内存开销放大。配置文件应视为可信输入。
+13. **`fsnotify` 遇到内核自己摘掉 watch 时无事件可依**：卸载（`IN_UNMOUNT`）或内核丢弃 watch
+    （`IN_IGNORED`）不会产生任何事件，库无从感知，只能靠上层健康检查或重启进程发现。父目录被
+    **删除或改名**则会返回 `ErrWatcher`（已覆盖）；对挂载/卸载频繁的环境请用 `watcher/poll`。
+14. **`poll` 的 `Interval` 没有下限**：设成 1ns 会变成忙轮询。建议 ≥ 10ms。
+15. **没有「监听是否在跑」的查询接口**：`Stats()` 目前只有四个计数器，监听状态计划在 v1.2 加入。
 
 ## 12. 未来计划
 
@@ -420,11 +446,13 @@ BenchmarkReloadParallel-10      1226572     982.0 ns/op    890 B/op   13 allocs/
 1. **变更通知（下一步）**：`m.Subscribe()` 返回带界缓冲区 + 丢弃计数的通道，或 `OnChange(func(Change[T]))`；
    `Change` 携带 `Reason`/`Version`，慢订阅者丢中间版本但不阻塞写者；订阅取消后不再收到通知。
    这是"热更新闭环"缺的最后一块。
-2. **混合监听器 `watcher/auto`**：fsnotify 为主 + 低频 poll 兜底，直接消掉限制 2、3（接口不变）。
-3. **`benchstat` 回归门禁**：把基准接进 CI，防止读路径悄悄变慢。
-4. **多层覆盖**：`Overlay` / 环境变量 / 默认值文件，复合摘要（解决"覆盖层变了但基座没变"）。
-5. **历史与回滚**：`History(n)`、`Rollback(v)`（回滚产生新版本号，不复活旧号）。
-6. **远程配置中心**：只做接口适配，不在核心包里引入网络依赖。
+2. **监听可观测性（v1.2）**：`Stats()` 增加 `Watching`、`WatcherFailures`（additive），
+   让健康检查能回答"热更新还在跑吗"，而不是只能看 `LastError()`。
+3. **混合监听器 `watcher/auto`**：fsnotify 为主 + 低频 poll 兜底，直接消掉限制 2、3（接口不变）。
+4. **`benchstat` 回归门禁**：把基准接进 CI，防止读路径悄悄变慢。
+5. **多层覆盖**：`Overlay` / 环境变量 / 默认值文件，复合摘要（解决"覆盖层变了但基座没变"）。
+6. **历史与回滚**：`History(n)`、`Rollback(v)`（回滚产生新版本号，不复活旧号）。
+7. **远程配置中心**：只做接口适配，不在核心包里引入网络依赖。
 
 ## 依赖升级策略
 
@@ -434,6 +462,10 @@ BenchmarkReloadParallel-10      1226572     982.0 ns/op    890 B/op   13 allocs/
   以及 `git diff go.mod`（新增传递依赖必须在 PR 描述里说明）。
 - 安全更新（有 CVE/GO-202x 的依赖）例外，可随时合入并在 CHANGELOG 标 `Security`。
 - Go 最低版本只在 CI 实际跑通后上调；上调属于 minor 变更，写入 CHANGELOG。
+- **已知的上游风险**：`gopkg.in/yaml.v3`（v3.0.1）自 2022 年后没有新版本，上游处于低维护状态。
+  它只被可选的 `decode/yaml` 使用。若出现影响解析的安全问题，优先评估切换到仍在维护的 fork
+  或 v4 分支，并在 CHANGELOG 标 `Security`。`golang.org/x/sys` 由 `fsnotify` 间接决定，只在
+  `fsnotify` 升级时随之变动。
 
 ## 贡献
 

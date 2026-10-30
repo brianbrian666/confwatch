@@ -39,6 +39,9 @@ func main() {
 	flag.Parse()
 
 	// 用信号控制生命周期：Ctrl-C 或 SIGTERM 都会触发优雅停止。
+	//
+	// 注意：这个 ctx 没有 deadline，适合交给 Watch——Watch 的 ctx 决定整个监听的
+	// 生命周期，若把带超时的启动 ctx 传进来，热更新会在超时后静默停止。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -79,10 +82,16 @@ func main() {
 	last := m.Get().Version()
 	for {
 		select {
-		case <-ctx.Done():
-			if err := <-done; err != nil {
-				log.Printf("监听器故障退出: %v", err)
+		case err := <-done:
+			// 监听器自己退出了：热更新已经停止，不要继续假装“在监听”。
+			if err != nil {
+				log.Printf("监听器故障退出（热更新已停止）: %v", err)
 			}
+			log.Printf("退出，最后版本 v%d", m.Get().Version())
+			return
+		case <-ctx.Done():
+			// 监听停止不靠 ctx，Watch 会因 ctx 结束自行返回，这里等它结束。
+			<-done
 			log.Printf("退出，最后版本 v%d", m.Get().Version())
 			return
 		case <-ticker.C:

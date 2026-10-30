@@ -105,13 +105,53 @@ func TestWatchFileEndToEndWithFsnotify(t *testing.T) {
 	}
 	final := m.Get().Version()
 	writeFile(t, path, `{"addr":":5050"}`)
-	time.Sleep(100 * time.Millisecond)
+	// 这里原本用 sleep(100ms) 判断“停止后没有更新”，那是弱断言：即使监听还在跑
+	// 也可能因时序侥幸通过。真正的保证是结构性的——Watch 已返回（监听 goroutine 已
+	// join）、Close 已拿到写者令牌，没有任何 goroutine 还能触发重载。所以改为断言
+	// 这两件事的可见结果，不再依赖时间窗口。
 	if got := m.Get().Version(); got != final {
 		t.Fatalf("停止后仍有发布: %v -> %v", final, got)
+	}
+	if err := m.Watch(context.Background()); !errors.Is(err, confwatch.ErrClosed) {
+		t.Fatalf("关闭后 Watch = %v, want ErrClosed", err)
 	}
 	// 已取消的 ctx 会先于关闭状态生效，所以这里用新的 ctx 验证 ErrClosed。
 	if _, err := m.Reload(context.Background()); !errors.Is(err, confwatch.ErrClosed) {
 		t.Fatalf("关闭后 Reload = %v, want ErrClosed", err)
+	}
+}
+
+// TestWatchReportsWatcherDeathWhenDirGone 验证“父目录被删除”在 Manager 这一层是可见的：
+// Watch 返回 ErrWatcher、LastError 同步更新，而不是静默继续（修复前实测会是后者）。
+func TestWatchReportsWatcherDeathWhenDirGone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.json")
+	writeFile(t, path, `{"addr":":8080"}`)
+
+	m := openManager(t, file.New(path), confwatch.WithWatcher(fswatcher.New(path)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- m.Watch(ctx) }()
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove dir: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, confwatch.ErrWatcher) {
+			t.Fatalf("Watch = %v, want ErrWatcher", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("目录被删除后 Watch 未返回（监听静默失效）")
+	}
+	if err := m.LastError(); !errors.Is(err, confwatch.ErrWatcher) {
+		t.Fatalf("LastError = %v, want ErrWatcher", err)
+	}
+	if got := m.Get().Version(); got != 1 {
+		t.Fatalf("version = %d, want 1（目录没了不应发布新版本）", got)
 	}
 }
 

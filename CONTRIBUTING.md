@@ -67,8 +67,8 @@ CI 会跑同样的命令（Go 1.24.x 与 1.27.x 两个版本）。**不要提交
 2. 全绿检查：`gofmt -l .` 为空、`go vet ./...`、`go test -race ./...`、`go test -bench=. -benchmem ./...`。
 3. **先推 main 并等 CI 跑通**（含最低 Go 版本矩阵），再打 tag：
    ```bash
-   git tag -a v1.0.0 -m "v1.0.0"
-   git push origin v1.0.0
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   git push origin vX.Y.Z
    ```
 4. 在 GitHub 创建 Release，正文直接使用 CHANGELOG 对应段落（含 Breaking 说明与迁移方式）。
 5. tag 推送后 pkg.go.dev 会自动索引，检查文档页是否正常显示（`https://pkg.go.dev/github.com/brianbrian666/confwatch`）。

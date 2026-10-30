@@ -54,11 +54,13 @@ jobs:
         run: go test -count=1 -race ./...
 
       - name: 并发稳定性（重复运行关键用例）
+        # 包含 ./... ：监听器包里的“目录被删除后 Run 必须报错”等用例依赖真实内核事件，
+        # 单次跑得快不代表稳定，必须重复。
         run: >
           go test -count=10 -race
-          -run 'TestConcurrent|TestWatch|TestStress'
-          .
-        timeout-minutes: 10
+          -run 'TestConcurrent|TestWatch|TestStress|TestRun|TestWatched'
+          ./...
+        timeout-minutes: 15
 
   bench:
     name: 基准冒烟

@@ -48,7 +48,13 @@
 //   - Get 可在任意 goroutine 并发调用。
 //   - Reload/TryReload/Close 之间通过写者令牌串行化：同一时刻最多只有一个发布在
 //     进行，因此版本号单调递增、不重复、不会相互覆盖。
-//   - 更新失败不会改变当前快照，只记录 LastError 并返回错误。
+//   - 更新失败不会改变当前快照，只记录 LastError 并返回错误。取消与被关闭不算
+//     失败：它们不写入 LastError、也不进入 ErrorHook（否则每次优雅关闭都会留下
+//     一条假故障）。
+//   - 库只对两类外部 panic 兜底：Watcher.Run 里的 panic（否则 Watch 会永久阻塞）
+//     与 ErrorHook 里的 panic（否则会带崩监听循环）。配置源、解码器、默认值函数、
+//     拷贝函数与校验器里的 panic 不会被 recover：它们属于编程错误，按 Go 的默认
+//     行为终止进程，在后台监听路径上也一样。
 //   - Manager 必须通过 Open 构造。零值 Manager 不可用：写入方法返回
 //     ErrNotInitialized，Get 返回无效快照。Manager 不可被拷贝。
 //
@@ -61,6 +67,9 @@
 //     不会堆积，也不会反向阻塞监听器。
 //   - 生命周期由 ctx 与 Close 共同控制：任意一个结束都会让 Watch 返回。ctx 取消
 //     或 Close 属于正常停止，Watch 返回 nil。
+//   - 注意 Watch 的 ctx 决定整个监听的生命周期，而不只约束某一次加载：带
+//     WithTimeout/WithDeadline 的启动 ctx 如果复用给 Watch，监听会在超时后静默
+//     停止（并返回 nil，与主动停止无法区分）。
 //   - Watch 返回前会等监听器 goroutine 退出，因此返回后不遗留 goroutine，也不
 //     会再有自动重载。同一个 Manager 同时只允许一个 Watch，返回后可以重启。
 //   - 后台重载失败不会终止监听：只写 LastError 并调用 ErrorHook，旧配置继续生效，
